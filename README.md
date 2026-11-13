@@ -1,36 +1,72 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# omlx-demo
 
-## Getting Started
+[oMLX](https://github.com/jundot/omlx) と [llama.cpp](https://github.com/ggml-org/llama.cpp) の推論速度を、同じモデルで比べるベンチマーク Web アプリです（Next.js）。両方のサーバに OpenAI 互換 API で同じリクエストを送り、ストリーミング応答から速度を計測します。
 
-First, run the development server:
+## 調査結果の要約
+
+MacBook Air（Apple M5・32GB）で、Gemma 4 12B（oMLX は MLX 4bit、llama.cpp は GGUF Q4_K_M）を使って比べました。
+
+| 項目 | 結果 |
+| --- | --- |
+| 長いプロンプト（約4,400トークン）の処理 | oMLX が約1.3倍速い |
+| 生成速度（1本だけのとき） | 同程度 |
+| 同時4リクエストの合計スループット | 同程度 |
+| 同じ文書を2回目に送ったときの応答 | llama.cpp が速い |
+
+- 長い文書やコードを毎回渡す用途では oMLX が有利です。短い対話が中心なら、大きな差はありません。
+- ファンのない機種では、続けて測ると熱で速度が落ちます。計測順を入れ替えて測り、先に測った値どうしで比べています。
+- 32GB の Mac で 12B クラスのモデルを2つのサーバに同時に載せると、oMLX のメモリガードによって長いプロンプトが失敗することがあります。計測は片方ずつ行ってください。
+
+数値は特定の機種・設定での結果です。環境が変われば結果も変わります。
+
+## 必要な環境
+
+- Apple Silicon の Mac（oMLX は macOS 15 以上）
+- Node.js 20.9 以上
+- oMLX（例: `http://127.0.0.1:8000`）と llama-server（例: `http://127.0.0.1:8080`）が起動していること
+  - どちらか片方だけでも動きます。接続できたサーバだけを計測します。
+
+## 使い方
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+http://localhost:3000 を開き、「全シナリオを計測」を押します。結果は画面に表示され、`bench-results/results.jsonl` にも追記されます。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 接続先の設定
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+接続先はサーバ側の環境変数で決まります（`.env.local` に書けます）。ブラウザから接続先を変えることはできません。
 
-## Learn More
+| 変数 | 既定値 |
+| --- | --- |
+| `OMLX_BASE_URL` | `http://127.0.0.1:8000/v1` |
+| `OMLX_MODEL` | `gemma-4-12B-it-4bit` |
+| `OMLX_API_KEY` | なし |
+| `OMLX_MAX_CONCURRENT_REQUESTS` | `8`（oMLX の既定値。同時処理数の警告に使用） |
+| `LLAMACPP_BASE_URL` | `http://127.0.0.1:8080/v1` |
+| `LLAMACPP_MODEL` | `gemma-4-12b-it-Q4_K_M.gguf` |
+| `LLAMACPP_API_KEY` | なし |
+| `BENCH_ALLOWED_HOSTS` | なし（`localhost` / `127.0.0.1` / `[::1]` 以外のホスト名を許可する場合にカンマ区切りで指定） |
 
-To learn more about Next.js, take a look at the following resources:
+### 計測シナリオ
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| シナリオ | 内容 |
+| --- | --- |
+| 短いプロンプト | 約30トークンの質問に回答 |
+| 長いプロンプト（初回） | 約4,000トークンの文書を要約 |
+| 長いプロンプト（2回目） | 直前と同じ文書に別の質問（プレフィックスキャッシュの効果） |
+| 同時2リクエスト / 同時4リクエスト | 短いプロンプトを同時に送信 |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- 温度 0、出力は `ignore_eos` で毎回 256 トークンに固定します。
+- 毎回プロンプトの先頭に一意の ID を入れ、前の計測のキャッシュが効かないようにしています。
+- 同時リクエスト数がサーバの同時処理数を超える場合は、画面に警告が出ます（llama-server は `--parallel` で設定）。
 
-## Deploy on Vercel
+## セキュリティ
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+ローカルでの計測用です。API は `localhost` 系のホストと同一オリジンからのリクエストだけを受け付けます。ただし `next dev` はすべてのネットワークインターフェースで待ち受けるため、LAN 内から直接アクセスされることを防ぎたい場合は `npx next dev -H 127.0.0.1` で起動してください。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## ライセンス
+
+[MIT](LICENSE)
