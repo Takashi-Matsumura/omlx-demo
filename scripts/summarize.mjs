@@ -17,6 +17,13 @@ const median = (xs) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
+// 最近傍法の p95（多人数利用で「遅い方の利用者」がどれだけ待つかの目安）
+const p95 = (xs) => {
+  if (!xs.length) return NaN;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.ceil(s.length * 0.95) - 1)];
+};
+
 function load(file) {
   const out = new Map();
   if (!existsSync(file)) return out;
@@ -25,10 +32,16 @@ function load(file) {
     const rec = JSON.parse(line);
     const ok = (rec.results ?? []).filter((r) => r.ok);
     const reqs = ok.flatMap((r) => r.requests);
+    const shortReqs = reqs.filter((q) => q.kind !== "long");
+    const longReqs = reqs.filter((q) => q.kind === "long");
     out.set(`${rec.target}:${rec.scenario}`, {
       n: ok.length,
       failed: (rec.results ?? []).length - ok.length,
       ttftMs: median(reqs.map((q) => q.ttftMs)),
+      ttftP95Ms: p95(reqs.map((q) => q.ttftMs)),
+      shortTtftMs: median(shortReqs.map((q) => q.ttftMs)),
+      shortTtftP95Ms: p95(shortReqs.map((q) => q.ttftMs)),
+      longTtftMs: median(longReqs.map((q) => q.ttftMs)),
       prefillTps: median(reqs.map((q) => q.prefillTps).filter((v) => v != null)),
       decodeTps: median(reqs.map((q) => q.decodeTps)),
       aggregateTps: median(ok.map((r) => r.aggregateTps)),
@@ -48,10 +61,20 @@ const ROWS = [
   ["parallel", "decodeTps", "同時2リクエスト: 1本あたりの生成速度（tok/s）", "high"],
   ["parallel", "aggregateTps", "同時2リクエスト: 合計スループット（tok/s）", "high"],
   ["parallel4", "aggregateTps", "同時4リクエスト: 合計スループット（tok/s）", "high"],
+  ["parallel8", "aggregateTps", "同時8リクエスト: 合計スループット（tok/s）", "high"],
+  ["parallel8", "decodeTps", "同時8リクエスト: 1本あたりの生成速度（tok/s）", "high"],
+  ["parallel8", "ttftP95Ms", "同時8リクエスト: 最初のトークンまで p95（秒）", "low"],
+  ["parallel16", "aggregateTps", "同時16リクエスト: 合計スループット（tok/s）", "high"],
+  ["parallel16", "decodeTps", "同時16リクエスト: 1本あたりの生成速度（tok/s）", "high"],
+  ["parallel16", "ttftP95Ms", "同時16リクエスト: 最初のトークンまで p95（秒）", "low"],
+  ["mixed", "shortTtftMs", "混在負荷: 短い質問の最初のトークンまで 中央値（秒）", "low"],
+  ["mixed", "shortTtftP95Ms", "混在負荷: 短い質問の最初のトークンまで p95（秒）", "low"],
+  ["mixed", "longTtftMs", "混在負荷: 長文の最初のトークンまで 中央値（秒）", "low"],
+  ["mixed", "aggregateTps", "混在負荷: 合計スループット（tok/s）", "high"],
 ];
 
 const fmt = (v, key) =>
-  v == null || Number.isNaN(v) ? "—" : key === "ttftMs" ? (v / 1000).toFixed(2) : v.toFixed(1);
+  v == null || Number.isNaN(v) ? "—" : key.endsWith("Ms") ? (v / 1000).toFixed(2) : v.toFixed(1);
 
 function verdict(o, l, better) {
   if ([o, l].some((v) => v == null || Number.isNaN(v))) return "—";
@@ -76,7 +99,11 @@ for (const [scenario, key, label, better] of ROWS) {
     `| ${label} | ${fmt(oFirst, key)} | ${fmt(oLater, key)} | ${fmt(lFirst, key)} | ${fmt(lLater, key)} | ${verdict(oFirst, lFirst, better)} |`,
   );
 }
-lines.push("", "各値は中央値。比較の判定は差が1割未満なら「同程度」。");
+lines.push(
+  "",
+  "各値は中央値（p95 と書いたものを除く）。比較の判定は差が1割未満なら「同程度」。",
+  "同時8・16リクエストと混在負荷は、両サーバとも同時処理数16の共有サーバ設定で測定（llama-server は --parallel 16 --kv-unified -c 65536）。",
+);
 
 const failures = [
   ...[...A].map(([k, v]) => [`A（llama.cpp → oMLX）${k}`, v]),

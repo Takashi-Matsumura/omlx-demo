@@ -49,6 +49,21 @@ export const SCENARIOS = {
     concurrency: 4,
     description: "短いプロンプトを4本同時に送信（合計スループット）",
   },
+  parallel8: {
+    label: "同時8リクエスト",
+    concurrency: 8,
+    description: "短いプロンプトを8本同時に送信（複数人での利用を想定）",
+  },
+  parallel16: {
+    label: "同時16リクエスト",
+    concurrency: 16,
+    description: "短いプロンプトを16本同時に送信（複数人での利用を想定）",
+  },
+  mixed: {
+    label: "混在負荷",
+    concurrency: 8,
+    description: "長文の要約2本の0.5秒後に短い質問6本を送信（長文処理中に短い質問がどれだけ待たされるか）",
+  },
 } as const;
 
 export type ScenarioId = keyof typeof SCENARIOS;
@@ -56,6 +71,7 @@ export const isScenarioId = (v: unknown): v is ScenarioId =>
   typeof v === "string" && Object.hasOwn(SCENARIOS, v);
 
 export type RequestMetrics = {
+  kind: "short" | "long";
   ttftMs: number; // 最初のトークンが届くまで
   totalMs: number;
   promptTokens: number | null;
@@ -88,26 +104,41 @@ function longDocument(): string {
 
 // nonce をプロンプトの先頭に入れて、前の計測のプレフィックスキャッシュが効かないようにする。
 // longCached は、直前の long と同じ nonce を使うことで「同じ文書の2回目」を作る。
-function scenarioPrompts(scenario: ScenarioId, nonce: string): string[] {
+type PromptSpec = { prompt: string; kind: "short" | "long"; delayMs: number };
+
+const shortPrompt = (head: string, i: number) => `${head}ローカル LLM の活用例を1つ挙げ、${(i % 4) + 2}文で説明してください。`;
+const longPrompt = (head: string) => `${head}次の文書を300字で要約してください。\n\n${longDocument()}`;
+
+function scenarioPrompts(scenario: ScenarioId, nonce: string): PromptSpec[] {
   const head = `[計測ID ${nonce}]\n`;
+  const short = (prompt: string, delayMs = 0): PromptSpec => ({ prompt, kind: "short", delayMs });
+  const long = (prompt: string): PromptSpec => ({ prompt, kind: "long", delayMs: 0 });
   switch (scenario) {
     case "short":
-      return [`${head}大規模言語モデルをローカルで動かす利点を、箇条書きで5つ挙げてください。`];
+      return [short(`${head}大規模言語モデルをローカルで動かす利点を、箇条書きで5つ挙げてください。`)];
     case "long":
-      return [`${head}次の文書を300字で要約してください。\n\n${longDocument()}`];
+      return [long(longPrompt(head))];
     case "longCached":
-      return [`${head}次の文書を300字で要約してください。\n\n${longDocument()}\n\n追加の質問: 測定条件をどうそろえたかだけを答えてください。`];
+      return [long(`${longPrompt(head)}\n\n追加の質問: 測定条件をどうそろえたかだけを答えてください。`)];
     case "parallel":
     case "parallel4":
-      return Array.from(
-        { length: scenario === "parallel" ? 2 : 4 },
-        (_, i) => `${head}ローカル LLM の活用例を1つ挙げ、${i + 2}文で説明してください。`,
-      );
+    case "parallel8":
+    case "parallel16":
+      return Array.from({ length: SCENARIOS[scenario].concurrency }, (_, i) => short(shortPrompt(head, i)));
+    case "mixed":
+      // 長文は別々の利用者が別々の文書を送った想定にするため、先頭の ID を変えてキャッシュを共有させない
+      return [
+        long(longPrompt(`[計測ID ${nonce}-L0]\n`)),
+        long(longPrompt(`[計測ID ${nonce}-L1]\n`)),
+        ...Array.from({ length: 6 }, (_, i) => short(shortPrompt(head, i), 500)),
+      ];
   }
 }
 
-async function measureOne(target: TargetId, prompt: string, signal: AbortSignal): Promise<RequestMetrics> {
+async function measureOne(target: TargetId, spec: PromptSpec, signal: AbortSignal): Promise<RequestMetrics> {
   const t = TARGETS[target];
+  if (spec.delayMs > 0) await new Promise((r) => setTimeout(r, spec.delayMs));
+  const prompt = spec.prompt;
   const started = performance.now();
   const res = await fetch(`${t.baseUrl}/chat/completions`, {
     method: "POST",
@@ -172,6 +203,7 @@ async function measureOne(target: TargetId, prompt: string, signal: AbortSignal)
   const promptTokens = usage?.prompt_tokens ?? null;
   const decodeMs = totalMs - ttftMs;
   return {
+    kind: spec.kind,
     ttftMs,
     totalMs,
     promptTokens,

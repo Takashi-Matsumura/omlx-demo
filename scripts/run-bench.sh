@@ -28,12 +28,16 @@ OMLX_PORT=${OMLX_PORT:-8000}
 RUNS=${RUNS:-3}                          # 通常シナリオの繰り返し回数
 P4_RUNS=${P4_RUNS:-5}                    # 同時4リクエストの繰り返し回数
 COOLDOWN=${COOLDOWN:-300}                # 各周の前の休止秒数
-SCENARIOS=${SCENARIOS:-"short long longCached parallel parallel4"}
+SCENARIOS=${SCENARIOS:-"short long longCached parallel parallel4 parallel8 parallel16 mixed"}
+# 多人数シナリオ（parallel8 / parallel16 / mixed）用の共有サーバ設定
+SHARED_SLOTS=${SHARED_SLOTS:-16}         # 同時処理数（両サーバ共通）
+SHARED_CTX=${SHARED_CTX:-65536}          # llama-server の KV 全体の長さ（--kv-unified で全スロットが共有）
 
 cd "$(dirname "$0")/.." || exit 1
 OUT="bench-results/$(scutil --get LocalHostName 2>/dev/null || hostname -s)-$(date +%Y%m%d-%H%M%S)"
 LOG="$OUT/run.log"
 SERVER_PID=""
+SERVER_CFG=""  # 起動中のサーバの設定。同じ設定なら起動し直さない
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -45,6 +49,7 @@ stop_server() {
     kill -0 "$SERVER_PID" 2>/dev/null && kill -9 "$SERVER_PID"
   fi
   SERVER_PID=""
+  SERVER_CFG=""
 }
 trap 'stop_server' EXIT
 trap 'log "中断しました"; exit 130' INT TERM
@@ -65,26 +70,39 @@ warm() { # $1=base_url $2=model  モデルを読み込ませてから測る
     -d "{\"model\":\"$2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}"
 }
 
-start_llama() { # $1=parallel
+same_cfg() { [ "$SERVER_CFG" = "$1" ] && [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; }
+
+start_llama() { # $1=parallel $2=ctx $3=unified(1/0)
+  local cfg="llama:$*"
+  same_cfg "$cfg" && return 0
   stop_server
   local args=(-m "$LLAMA_MODEL" --host 127.0.0.1 --port "$LLAMA_PORT" -ngl 999 --metrics
-    --cache-reuse 256 -c "$LLAMA_CTX" --parallel "$1" --flash-attn on)
+    --cache-reuse 256 -c "$2" --parallel "$1" --flash-attn on)
+  # --parallel を明示すると KV は既定で各スロットに分割される（1本あたり ctx/parallel）。
+  # 共有サーバ設定では --kv-unified で全スロットが1つの KV を共有し、長いプロンプトも入るようにする
+  [ "$3" = 1 ] && args+=(--kv-unified)
   [ -n "$LLAMA_MMPROJ" ] && args+=(--mmproj "$LLAMA_MMPROJ")
   "$LLAMA_SERVER" "${args[@]}" >>"$OUT/llama-server.log" 2>&1 &
   SERVER_PID=$!
   wait_up "http://127.0.0.1:$LLAMA_PORT/v1/models" || die "llama-server が起動しません（$OUT/llama-server.log を確認）"
   warm "http://127.0.0.1:$LLAMA_PORT/v1" "$(basename "$LLAMA_MODEL")"
-  log "llama-server 起動（--parallel $1）"
+  SERVER_CFG=$cfg
+  log "llama-server 起動（--parallel $1 -c $2$([ "$3" = 1 ] && echo " --kv-unified")）"
 }
 
-start_omlx() {
+start_omlx() { # $1=同時処理数（空なら oMLX の既定値）
+  local cfg="omlx:${1:-default}"
+  same_cfg "$cfg" && return 0
   stop_server
-  "$OMLX_CLI" serve --model-dir "$OMLX_MODEL_DIR" --host 127.0.0.1 --port "$OMLX_PORT" \
-    --paged-ssd-cache-dir "$OMLX_CACHE_DIR" --paged-ssd-cache-max-size 30GB >>"$OUT/omlx.log" 2>&1 &
+  local args=(serve --model-dir "$OMLX_MODEL_DIR" --host 127.0.0.1 --port "$OMLX_PORT"
+    --paged-ssd-cache-dir "$OMLX_CACHE_DIR" --paged-ssd-cache-max-size 30GB)
+  [ -n "${1:-}" ] && args+=(--max-concurrent-requests "$1")
+  "$OMLX_CLI" "${args[@]}" >>"$OUT/omlx.log" 2>&1 &
   SERVER_PID=$!
   wait_up "http://127.0.0.1:$OMLX_PORT/v1/models" || die "oMLX が起動しません（$OUT/omlx.log を確認）"
   warm "http://127.0.0.1:$OMLX_PORT/v1" "${OMLX_MODEL:-gemma-4-12B-it-4bit}"
-  log "oMLX 起動"
+  SERVER_CFG=$cfg
+  log "oMLX 起動（同時処理数 ${1:-既定値}）"
 }
 
 run_one() { # $1=target $2=scenario $3=runs $4=jsonl
@@ -98,20 +116,25 @@ run_one() { # $1=target $2=scenario $3=runs $4=jsonl
     catch{console.log(s.slice(0,200))}})')"
 }
 
-measure() { # $1=target $2=jsonl
-  local s
+measure() { # $1=target $2=jsonl  シナリオごとに必要な設定でサーバを起動してから測る
+  local s runs
   for s in $SCENARIOS; do
-    [ "$s" = parallel4 ] && continue
-    run_one "$1" "$s" "$RUNS" "$2"
+    runs=$RUNS
+    case "$s" in
+      parallel4) # MacBook Air と同じ条件（llama-server は --parallel 4）
+        runs=$P4_RUNS
+        if [ "$1" = llamacpp ]; then start_llama 4 "$LLAMA_CTX" 0; else start_omlx; fi ;;
+      parallel8 | parallel16 | mixed) # 共有サーバ設定
+        if [ "$1" = llamacpp ]; then start_llama "$SHARED_SLOTS" "$SHARED_CTX" 1; else start_omlx "$SHARED_SLOTS"; fi ;;
+      *) # MacBook Air と同じ条件
+        if [ "$1" = llamacpp ]; then start_llama 2 "$LLAMA_CTX" 0; else start_omlx; fi ;;
+    esac
+    run_one "$1" "$s" "$runs" "$2"
   done
-  if [[ " $SCENARIOS " == *" parallel4 "* ]]; then
-    [ "$1" = llamacpp ] && start_llama 4 # 同時4本は llama-server を --parallel 4 で起動し直す
-    run_one "$1" parallel4 "$P4_RUNS" "$2"
-  fi
 }
 
-only_llama() { start_llama 2; measure llamacpp "$1"; stop_server; }
-only_omlx() { start_omlx; measure omlx "$1"; stop_server; }
+only_llama() { measure llamacpp "$1"; stop_server; }
+only_omlx() { measure omlx "$1"; stop_server; }
 cooldown() { log "休止 ${COOLDOWN} 秒"; sleep "$COOLDOWN"; }
 
 # ---- 事前チェック ----
@@ -139,6 +162,7 @@ caffeinate -i -w $$ &
   echo "- oMLX: $(defaults read "$(dirname "$(dirname "$OMLX_CLI")")/Info.plist" CFBundleShortVersionString 2>/dev/null || echo 不明)"
   echo "- GGUF: $(basename "$LLAMA_MODEL")（SHA256 $(shasum -a 256 "$LLAMA_MODEL" | cut -c1-16)…）"
   echo "- 条件: RUNS=$RUNS P4_RUNS=$P4_RUNS COOLDOWN=${COOLDOWN}s"
+  echo "- 共有サーバ設定（parallel8 / parallel16 / mixed）: 同時処理数 ${SHARED_SLOTS}、llama-server -c ${SHARED_CTX} --kv-unified"
 } >"$OUT/env.md"
 log "計測開始。出力先: $OUT"
 
