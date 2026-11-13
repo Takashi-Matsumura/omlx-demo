@@ -37,6 +37,10 @@ export const SCENARIOS = {
     label: "同時2リクエスト",
     description: "短いプロンプトを2本同時に送信（合計スループット。llama-server --parallel 2 に合わせた本数）",
   },
+  parallel4: {
+    label: "同時4リクエスト",
+    description: "短いプロンプトを4本同時に送信（合計スループット。llama-server は --parallel 4 以上で起動しておく）",
+  },
 } as const;
 
 export type ScenarioId = keyof typeof SCENARIOS;
@@ -86,8 +90,9 @@ function scenarioPrompts(scenario: ScenarioId, nonce: string): string[] {
     case "longCached":
       return [`${head}次の文書を300字で要約してください。\n\n${longDocument()}\n\n追加の質問: 測定条件をどうそろえたかだけを答えてください。`];
     case "parallel":
+    case "parallel4":
       return Array.from(
-        { length: 2 },
+        { length: scenario === "parallel" ? 2 : 4 },
         (_, i) => `${head}ローカル LLM の活用例を1つ挙げ、${i + 2}文で説明してください。`,
       );
   }
