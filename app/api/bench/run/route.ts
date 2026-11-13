@@ -1,9 +1,25 @@
 import { mkdir, appendFile } from "node:fs/promises";
 import path from "node:path";
 import { isScenarioId, isTargetId, runScenario, TARGETS, type ScenarioResult } from "@/lib/bench";
+import { rejectCrossSite } from "@/lib/guard";
+
+// 計測は1本ずつ（同時に流すと測定値が崩れ、推論サーバの負荷も大きくなる）
+let busy = false;
 
 // ローカル計測専用のエンドポイント。接続先は lib/bench.ts で固定している。
 export async function POST(request: Request) {
+  const rejected = rejectCrossSite(request);
+  if (rejected) return rejected;
+  if (busy) return Response.json({ error: "別の計測が実行中です" }, { status: 409 });
+  busy = true;
+  try {
+    return await handle(request);
+  } finally {
+    busy = false;
+  }
+}
+
+async function handle(request: Request) {
   let body: unknown;
   try {
     body = await request.json();

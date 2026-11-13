@@ -1,8 +1,11 @@
 import { connection } from "next/server";
+import { rejectCrossSite } from "@/lib/guard";
 import { checkTarget, SCENARIOS, TARGETS, type TargetId } from "@/lib/bench";
 
-export async function GET() {
+export async function GET(request: Request) {
   await connection();
+  const rejected = rejectCrossSite(request);
+  if (rejected) return rejected;
   const ids = Object.keys(TARGETS) as TargetId[];
   const checks = await Promise.all(ids.map((id) => checkTarget(id)));
   return Response.json({
