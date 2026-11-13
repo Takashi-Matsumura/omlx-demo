@@ -7,12 +7,15 @@ export const TARGETS = {
     baseUrl: process.env.OMLX_BASE_URL ?? "http://127.0.0.1:8000/v1",
     model: process.env.OMLX_MODEL ?? "gemma-4-12B-it-4bit",
     apiKey: process.env.OMLX_API_KEY,
+    // oMLX の同時処理数は管理 API（要認証）からしか取れないため、既定値 8 を仮定する
+    assumedSlots: Number(process.env.OMLX_MAX_CONCURRENT_REQUESTS ?? 8),
   },
   llamacpp: {
     label: "llama.cpp",
     baseUrl: process.env.LLAMACPP_BASE_URL ?? "http://127.0.0.1:8080/v1",
     model: process.env.LLAMACPP_MODEL ?? "gemma-4-12b-it-Q4_K_M.gguf",
     apiKey: process.env.LLAMACPP_API_KEY,
+    assumedSlots: null, // /props の total_slots から取得する
   },
 } as const;
 
@@ -23,23 +26,28 @@ export const isTargetId = (v: unknown): v is TargetId =>
 export const SCENARIOS = {
   short: {
     label: "短いプロンプト",
+    concurrency: 1,
     description: "約30トークンの質問に回答（生成速度の目安）",
   },
   long: {
     label: "長いプロンプト（初回）",
+    concurrency: 1,
     description: "約4,000トークンの文書を要約（プリフィル速度の目安）",
   },
   longCached: {
     label: "長いプロンプト（2回目）",
+    concurrency: 1,
     description: "直前と同じ文書に別の質問（プレフィックスキャッシュの効果）",
   },
   parallel: {
     label: "同時2リクエスト",
-    description: "短いプロンプトを2本同時に送信（合計スループット。llama-server --parallel 2 に合わせた本数）",
+    concurrency: 2,
+    description: "短いプロンプトを2本同時に送信（合計スループット）",
   },
   parallel4: {
     label: "同時4リクエスト",
-    description: "短いプロンプトを4本同時に送信（合計スループット。llama-server は --parallel 4 以上で起動しておく）",
+    concurrency: 4,
+    description: "短いプロンプトを4本同時に送信（合計スループット）",
   },
 } as const;
 
@@ -173,6 +181,20 @@ async function measureOne(target: TargetId, prompt: string, signal: AbortSignal)
   };
 }
 
+// 接続エラーなどを、原因がわかる日本語に置き換える
+export function friendlyError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const cause = e instanceof Error && e.cause instanceof Error ? e.cause.message : "";
+  if (/ECONNREFUSED/.test(cause) || (msg === "fetch failed" && !cause)) {
+    return "サーバに接続できません（起動していないか、ポート番号が違います）";
+  }
+  if (e instanceof Error && (e.name === "TimeoutError" || /timeout/i.test(msg))) {
+    return "サーバの応答がありません（タイムアウト）";
+  }
+  if (msg === "fetch failed") return `サーバに接続できません（${cause}）`;
+  return msg;
+}
+
 export async function runScenario(target: TargetId, scenario: ScenarioId, nonce: string): Promise<ScenarioResult> {
   const prompts = scenarioPrompts(scenario, nonce);
   const signal = AbortSignal.timeout(300_000);
@@ -187,7 +209,7 @@ export async function runScenario(target: TargetId, scenario: ScenarioId, nonce:
       target,
       scenario,
       ok: false,
-      error: e instanceof Error ? e.message : String(e),
+      error: friendlyError(e),
       requests: [],
       wallMs: performance.now() - started,
       aggregateTps: 0,
@@ -195,20 +217,51 @@ export async function runScenario(target: TargetId, scenario: ScenarioId, nonce:
   }
 }
 
-export async function checkTarget(target: TargetId): Promise<{ ok: boolean; models?: string[]; modelFound?: boolean; error?: string }> {
+export type TargetStatus = {
+  ok: boolean;
+  models?: string[];
+  modelFound?: boolean;
+  slots?: number | null; // 同時に処理できるリクエスト数
+  slotsSource?: "server" | "assumed";
+  error?: string;
+};
+
+// llama-server の /props（OpenAI 互換 API の外側）から同時処理数を読む
+async function llamaSlots(baseUrl: string, apiKey?: string): Promise<number | null> {
+  try {
+    const res = await fetch(new URL("/props", baseUrl), {
+      signal: AbortSignal.timeout(3000),
+      headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { total_slots?: unknown };
+    return typeof json.total_slots === "number" ? json.total_slots : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function checkTarget(target: TargetId): Promise<TargetStatus> {
   const t = TARGETS[target];
   try {
     const res = await fetch(`${t.baseUrl}/models`, {
       signal: AbortSignal.timeout(3000),
       headers: t.apiKey ? { authorization: `Bearer ${t.apiKey}` } : {},
     });
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, error: `認証に失敗しました（HTTP ${res.status}。API キーを確認してください）` };
+    }
+    if (!res.ok) return { ok: false, error: `サーバがエラーを返しました（HTTP ${res.status}）` };
     const json = (await res.json()) as { data?: { id: string }[] };
     const models = json.data?.map((m) => m.id) ?? [];
     // llama-server はモデル ID をファイルのフルパスで返すため、末尾一致でも可とする
     const modelFound = models.some((m) => m === t.model || m.endsWith(`/${t.model}`));
-    return { ok: true, models, modelFound };
+    if (t.assumedSlots != null) {
+      return { ok: true, models, modelFound, slots: t.assumedSlots, slotsSource: "assumed" };
+    }
+    const slots = await llamaSlots(t.baseUrl, t.apiKey);
+    return { ok: true, models, modelFound, slots, slotsSource: slots == null ? undefined : "server" };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, error: friendlyError(e) };
   }
 }

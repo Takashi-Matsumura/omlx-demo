@@ -10,9 +10,11 @@ type Target = {
   ok: boolean;
   models?: string[];
   modelFound?: boolean;
+  slots?: number | null;
+  slotsSource?: "server" | "assumed";
   error?: string;
 };
-type Scenario = { id: string; label: string; description: string };
+type Scenario = { id: string; label: string; description: string; concurrency: number };
 type RequestMetrics = {
   ttftMs: number;
   totalMs: number;
@@ -79,7 +81,7 @@ export default function BenchApp() {
       setTargets(json.targets);
       setScenarios(json.scenarios);
     } catch (e) {
-      setError(String(e));
+      setError(`接続状態を取得できませんでした（${String(e)}）`);
     }
   }, []);
 
@@ -143,6 +145,16 @@ export default function BenchApp() {
               <div>{t.baseUrl}</div>
               <div>model: {t.model}</div>
               {!t.ok && <div className="text-red-600 dark:text-red-400">{t.error}</div>}
+              {t.ok && (
+                <div>
+                  同時処理数:{" "}
+                  {t.slots == null
+                    ? "不明"
+                    : t.slotsSource === "server"
+                      ? `${t.slots}（サーバから取得）`
+                      : `${t.slots}（既定値を仮定。サーバから取得できないため）`}
+                </div>
+              )}
               {t.ok && t.modelFound === false && (
                 <div className="text-amber-600">サーバのモデル一覧に {t.model} がありません: {t.models?.join(", ")}</div>
               )}
@@ -188,23 +200,40 @@ export default function BenchApp() {
       </section>
       {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
 
-      <section className="mt-8 space-y-6">
+      <p className="mt-8 text-xs text-zinc-500">バーの長さは速さを表します（どの指標も、長いほど速い）。</p>
+      <section className="mt-3 space-y-6">
         {scenarios.map((s) => {
           const sums = targets.map((t) => ({ t, sum: summarize(records[`${t.id}:${s.id}`]), rec: records[`${t.id}:${s.id}`] }));
           return (
             <div key={s.id} className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
               <h2 className="font-medium">{s.label}</h2>
               <p className="text-xs text-zinc-500">{s.description}</p>
+              {targets
+                .filter((t) => t.ok && t.slots != null && t.slots < s.concurrency)
+                .map((t) => (
+                  <p
+                    key={t.id}
+                    role="alert"
+                    className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                  >
+                    {t.label} の同時処理数は {t.slots} です。{s.concurrency}本のうち{s.concurrency - (t.slots ?? 0)}
+                    本は前のリクエストの完了を待つため、この結果は公平な比較になりません
+                    {t.id === "llamacpp" ? `（llama-server を --parallel ${s.concurrency} 以上で起動してください）` : ""}。
+                  </p>
+                ))}
               <div className="mt-3 grid gap-4 sm:grid-cols-2">
                 {METRICS.map((m) => {
                   const vals = sums.map(({ sum }) => (sum ? sum[m.key] : null));
-                  const max = Math.max(...vals.map((v) => v ?? 0), 0);
-                  const present = vals.filter((v): v is number => v != null && !Number.isNaN(v));
+                  const present = vals.filter((v): v is number => v != null && !Number.isNaN(v) && v > 0);
+                  const max = present.length ? Math.max(...present) : 0;
+                  const min = present.length ? Math.min(...present) : 0;
+                  // バーの長さは常に「速さ」を表す（小さいほど速い指標は逆数で比べる）
+                  const barRatio = (v: number) => (m.better === "high" ? v / max : min / v);
                   const best = present.length > 1 ? (m.better === "high" ? Math.max(...present) : Math.min(...present)) : null;
                   return (
                     <div key={m.key}>
                       <div className="text-xs text-zinc-500">
-                        {m.label}（{m.better === "high" ? "大きいほど速い" : "小さいほど速い"}）
+                        {m.label}（{m.better === "high" ? "値が大きいほど速い" : "値が小さいほど速い"}）
                       </div>
                       {sums.map(({ t, rec }, i) => {
                         const v = vals[i];
@@ -213,10 +242,10 @@ export default function BenchApp() {
                           <div key={t.id} className="mt-1 flex items-center gap-2 text-sm">
                             <span className="w-20 shrink-0">{t.label}</span>
                             <div className="h-3 flex-1 rounded bg-zinc-100 dark:bg-zinc-800">
-                              {v != null && max > 0 && (
+                              {v != null && v > 0 && max > 0 && (
                                 <div
                                   className={`h-3 rounded ${t.id === "omlx" ? "bg-sky-500" : "bg-orange-500"}`}
-                                  style={{ width: `${(v / max) * 100}%` }}
+                                  style={{ width: `${barRatio(v) * 100}%` }}
                                 />
                               )}
                             </div>
