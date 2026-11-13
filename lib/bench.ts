@@ -107,6 +107,9 @@ async function measureOne(target: TargetId, prompt: string, signal: AbortSignal)
       model: t.model,
       messages: [{ role: "user", content: prompt }],
       max_tokens: MAX_TOKENS,
+      // 出力の長さをそろえるため、終了トークンを無視して毎回 MAX_TOKENS まで生成させる
+      // （oMLX・llama-server とも ignore_eos に対応）
+      ignore_eos: true,
       temperature: 0,
       stream: true,
       stream_options: { include_usage: true },

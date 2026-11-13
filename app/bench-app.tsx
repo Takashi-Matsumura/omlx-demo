@@ -125,7 +125,7 @@ export default function BenchApp() {
     <main className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6">
       <h1 className="text-2xl font-semibold tracking-tight">oMLX vs llama.cpp ベンチマーク</h1>
       <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
-        同じモデル（Gemma 4 12B・4bit 相当）を両方のサーバで動かし、OpenAI 互換 API 経由で速度を比べます。温度 0・最大 256 トークン。
+        同じモデル（Gemma 4 12B・4bit 相当）を両方のサーバで動かし、OpenAI 互換 API 経由で速度を比べます。温度 0・出力は毎回 256 トークンに固定（ignore_eos）。
       </p>
 
       <section className="mt-8 grid gap-3 sm:grid-cols-2">
