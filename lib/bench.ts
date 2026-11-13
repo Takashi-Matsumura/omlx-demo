@@ -74,18 +74,21 @@ function longDocument(): string {
   return Array.from({ length: 40 }, (_, i) => para(i + 1)).join("\n");
 }
 
-function scenarioPrompts(scenario: ScenarioId): string[] {
+// nonce をプロンプトの先頭に入れて、前の計測のプレフィックスキャッシュが効かないようにする。
+// longCached は、直前の long と同じ nonce を使うことで「同じ文書の2回目」を作る。
+function scenarioPrompts(scenario: ScenarioId, nonce: string): string[] {
+  const head = `[計測ID ${nonce}]\n`;
   switch (scenario) {
     case "short":
-      return ["大規模言語モデルをローカルで動かす利点を、箇条書きで5つ挙げてください。"];
+      return [`${head}大規模言語モデルをローカルで動かす利点を、箇条書きで5つ挙げてください。`];
     case "long":
-      return [`次の文書を300字で要約してください。\n\n${longDocument()}`];
+      return [`${head}次の文書を300字で要約してください。\n\n${longDocument()}`];
     case "longCached":
-      return [`次の文書を300字で要約してください。\n\n${longDocument()}\n\n追加の質問: 測定条件をどうそろえたかだけを答えてください。`];
+      return [`${head}次の文書を300字で要約してください。\n\n${longDocument()}\n\n追加の質問: 測定条件をどうそろえたかだけを答えてください。`];
     case "parallel":
       return Array.from(
         { length: 2 },
-        (_, i) => `ローカル LLM の活用例を1つ挙げ、${i + 2}文で説明してください。`,
+        (_, i) => `${head}ローカル LLM の活用例を1つ挙げ、${i + 2}文で説明してください。`,
       );
   }
 }
@@ -162,8 +165,8 @@ async function measureOne(target: TargetId, prompt: string, signal: AbortSignal)
   };
 }
 
-export async function runScenario(target: TargetId, scenario: ScenarioId): Promise<ScenarioResult> {
-  const prompts = scenarioPrompts(scenario);
+export async function runScenario(target: TargetId, scenario: ScenarioId, nonce: string): Promise<ScenarioResult> {
+  const prompts = scenarioPrompts(scenario, nonce);
   const signal = AbortSignal.timeout(300_000);
   const started = performance.now();
   try {

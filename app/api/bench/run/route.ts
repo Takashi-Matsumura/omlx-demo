@@ -1,5 +1,6 @@
 import { mkdir, appendFile } from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { isScenarioId, isTargetId, runScenario, TARGETS, type ScenarioResult } from "@/lib/bench";
 import { rejectCrossSite } from "@/lib/guard";
 
@@ -33,15 +34,16 @@ async function handle(request: Request) {
 
   const results: ScenarioResult[] = [];
   for (let i = 0; i < n; i++) {
-    // 2回目キャッシュの計測は、直前に同じ文書で初回を流してから測る
+    const nonce = randomUUID();
+    // 2回目キャッシュの計測は、直前に同じ nonce・同じ文書で初回を流してから測る
     if (scenario === "longCached") {
-      const warm = await runScenario(target, "long");
+      const warm = await runScenario(target, "long", nonce);
       if (!warm.ok) {
         results.push({ ...warm, scenario });
         break;
       }
     }
-    const r = await runScenario(target, scenario);
+    const r = await runScenario(target, scenario, nonce);
     results.push(r);
     if (!r.ok) break;
   }
