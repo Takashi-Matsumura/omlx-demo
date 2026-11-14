@@ -92,6 +92,19 @@ LLAMA_MODEL=/path/to/gemma-4-12b-it-Q4_K_M.gguf scripts/run-bench.sh
 | `RUNS` / `P4_RUNS` | `3` / `5` | 通常シナリオ / 同時4リクエストの繰り返し回数 |
 | `COOLDOWN` | `300` | 各周の前の休止秒数 |
 | `SCENARIOS` | 全シナリオ | 例: `"short long"` で一部だけ測る |
+| `SHARED_SLOTS` / `SHARED_CTX` | `16` / `65536` | 多人数シナリオでの同時処理数と、llama-server の KV 全体の長さ |
+
+### 多人数シナリオ（共有サーバの想定）
+
+複数人で1台のサーバを使う場合を想定し、次の3つのシナリオも測ります。両サーバとも、同時処理数16の共有サーバ設定で起動し直してから測ります。
+
+| シナリオ | 内容 | サーバの設定 |
+| --- | --- | --- |
+| `parallel8` / `parallel16` | 短いプロンプトを8本・16本同時に送信 | llama-server: `--parallel 16 --kv-unified -c 65536`、oMLX: `--max-concurrent-requests 16` |
+| `mixed` | 長文の要約2本の0.5秒後に短い質問6本を送信 | 同上 |
+
+- `summary.md` には、最初のトークンまでの時間の p95（遅い方の利用者がどれだけ待つか）も出ます。
+- llama-server は `--parallel` を明示すると KV を各スロットに分けるため（1本あたり `-c` ÷ スロット数）、`--kv-unified` を付けないと同時16本では長いプロンプトが入りません。
 
 ## 4. 結果
 
